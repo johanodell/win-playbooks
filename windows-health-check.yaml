@@ -1,66 +1,40 @@
 ---
-- name: Windows Health Check
+- name: Windows Health Report
   hosts: "{{ vm_name }}"
   gather_facts: false
 
+  vars:
+    cpu_warning: 75
+    cpu_critical: 90
+    memory_warning: 80
+    memory_critical: 90
+    disk_warning: 20
+    disk_critical: 10
+
   tasks:
-    - name: Collect Windows health information
+    - name: Collect Windows health metrics
       ansible.windows.win_powershell:
         script: |
           $os = Get-CimInstance Win32_OperatingSystem
-          $cpu = Get-CimInstance Win32_Processor
-          $disks = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3"
+          $cpu = @(Get-CimInstance Win32_Processor)
+          $disks = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3")
 
-          $cpuLoad = [math]::Round(
-            ($cpu | Measure-Object -Property LoadPercentage -Average).Average, 1
+          $cpuLoad = ($cpu | Measure-Object -Property LoadPercentage -Average).Average
+
+          $memoryUsed = 100 * (
+            1 - ($os.FreePhysicalMemory / $os.TotalVisibleMemorySize)
           )
 
-          $totalMemory = [math]::Round(
-            $os.TotalVisibleMemorySize / 1MB, 2
-          )
-
-          $freeMemory = [math]::Round(
-            $os.FreePhysicalMemory / 1MB, 2
-          )
-
-          $memoryUsedPercent = [math]::Round(
-            (1 - ($os.FreePhysicalMemory /
-            $os.TotalVisibleMemorySize)) * 100, 1
-          )
-
-          $diskInfo = @(
+          $diskResults = @(
             foreach ($disk in $disks) {
-              $freePercent = if ($disk.Size -gt 0) {
-                [math]::Round(
-                  ($disk.FreeSpace / $disk.Size) * 100, 1
-                )
-              } else {
-                0
-              }
+              if ($disk.Size -gt 0) {
+                $freePct = 100 * $disk.FreeSpace / $disk.Size
 
-              @{
-                Drive = $disk.DeviceID
-                FreeGB = [math]::Round($disk.FreeSpace / 1GB, 2)
-                TotalGB = [math]::Round($disk.Size / 1GB, 2)
-                FreePercent = $freePercent
-              }
-            }
-          )
-
-          $events = @(
-            foreach ($log in @('System', 'Application')) {
-              Get-WinEvent -FilterHashtable @{
-                LogName = $log
-                Level = 1, 2
-                StartTime = (Get-Date).AddHours(-24)
-              } -MaxEvents 5 -ErrorAction SilentlyContinue |
-              ForEach-Object {
                 @{
-                  Log = $_.LogName
-                  Time = $_.TimeCreated.ToString('s')
-                  EventID = $_.Id
-                  Source = $_.ProviderName
-                  Message = ($_.Message -replace '\s+', ' ')
+                  Drive = $disk.DeviceID
+                  FreePercent = [math]::Round($freePct, 1)
+                  FreeGB = [math]::Round($disk.FreeSpace / 1GB, 1)
+                  TotalGB = [math]::Round($disk.Size / 1GB, 1)
                 }
               }
             }
@@ -79,38 +53,125 @@
             }
           }
 
-          $sessionManager = Get-ItemProperty `
+          $rename = Get-ItemProperty `
             'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' `
             -Name PendingFileRenameOperations `
             -ErrorAction SilentlyContinue
 
-          if ($sessionManager.PendingFileRenameOperations) {
+          if ($rename.PendingFileRenameOperations) {
             $pendingReboot = $true
           }
+
+          $criticalEvents = @(
+            Get-WinEvent -FilterHashtable @{
+              LogName = 'System', 'Application'
+              Level = 1
+              StartTime = (Get-Date).AddHours(-24)
+            } -ErrorAction SilentlyContinue
+          )
 
           $Ansible.Result = @{
             ComputerName = $env:COMPUTERNAME
             OperatingSystem = $os.Caption
-            LastBoot = $os.LastBootUpTime.ToString('s')
-            CPUPercent = $cpuLoad
-            TotalMemoryGB = $totalMemory
-            FreeMemoryGB = $freeMemory
-            MemoryUsedPercent = $memoryUsedPercent
-            Disks = $diskInfo
+            CPUPercent = [math]::Round($cpuLoad, 1)
+            MemoryPercent = [math]::Round($memoryUsed, 1)
+            Disks = $diskResults
             PendingReboot = $pendingReboot
-            RecentErrors = $events
+            UptimeDays = [math]::Round(
+              ((Get-Date) - $os.LastBootUpTime).TotalDays, 1
+            )
+            CriticalEvents24h = @($criticalEvents).Count
           }
       register: health
 
+    - name: Initialize health checks
+      ansible.builtin.set_fact:
+        health_checks:
+          - name: CPU
+            value: "{{ health.result.CPUPercent }}%"
+            status: >-
+              {{
+                'CRITICAL' if health.result.CPUPercent >= cpu_critical
+                else 'WARNING' if health.result.CPUPercent >= cpu_warning
+                else 'PASS'
+              }}
+
+          - name: Memory
+            value: "{{ health.result.MemoryPercent }}%"
+            status: >-
+              {{
+                'CRITICAL' if health.result.MemoryPercent >= memory_critical
+                else 'WARNING' if health.result.MemoryPercent >= memory_warning
+                else 'PASS'
+              }}
+
+          - name: Pending reboot
+            value: "{{ 'Yes' if health.result.PendingReboot else 'No' }}"
+            status: "{{ 'WARNING' if health.result.PendingReboot else 'PASS' }}"
+
+          - name: Critical events (24h)
+            value: "{{ health.result.CriticalEvents24h }}"
+            status: >-
+              {{
+                'WARNING' if health.result.CriticalEvents24h > 0
+                else 'PASS'
+              }}
+
+    - name: Add disk health checks
+      ansible.builtin.set_fact:
+        health_checks: >-
+          {{
+            health_checks +
+            [{
+              'name': 'Disk ' ~ item.Drive,
+              'value': (item.FreePercent | string) ~ '% free (' ~
+                       (item.FreeGB | string) ~ ' GB / ' ~
+                       (item.TotalGB | string) ~ ' GB)',
+              'status':
+                'CRITICAL' if item.FreePercent < disk_critical
+                else 'WARNING' if item.FreePercent < disk_warning
+                else 'PASS'
+            }]
+          }}
+      loop: "{{ health.result.Disks }}"
+      loop_control:
+        label: "{{ item.Drive }}"
+
+    - name: Calculate overall health status
+      ansible.builtin.set_fact:
+        overall_status: >-
+          {{
+            'CRITICAL' if
+              (health_checks | selectattr('status', 'equalto', 'CRITICAL') | list | length > 0)
+            else 'WARNING' if
+              (health_checks | selectattr('status', 'equalto', 'WARNING') | list | length > 0)
+            else 'PASS'
+          }}
+
     - name: Display Windows health report
       ansible.builtin.debug:
-        var: health.result
+        msg: |
+          ================================================
+                    WINDOWS HEALTH REPORT
+          ================================================
+          Host: {{ health.result.ComputerName }}
+          OS: {{ health.result.OperatingSystem }}
+          Incident: {{ incident_id | default('N/A') }}
+          Uptime: {{ health.result.UptimeDays }} days
 
-    - name: Check health thresholds
-      ansible.builtin.assert:
-        that:
-          - health.result.CPUPercent < 90
-          - health.result.MemoryUsedPercent < 90
-          - health.result.Disks | selectattr('FreePercent', 'lt', 20) | list | length == 0
-        fail_msg: "Windows health check detected resource issues."
-        success_msg: "Windows resource health checks passed."
+          ------------------------------------------------
+          HEALTH CHECKS
+          ------------------------------------------------
+          {% for check in health_checks %}
+          [{{ '%-8s' | format(check.status | trim) }}] {{ '%-25s' | format(check.name) }} {{ check.value }}
+          {% endfor %}
+          ------------------------------------------------
+          OVERALL STATUS: {{ overall_status | trim }}
+          ================================================
+
+    - name: Publish health summary
+      ansible.builtin.set_stats:
+        data:
+          windows_health_status: "{{ overall_status | trim }}"
+          windows_health_checks: "{{ health_checks }}"
+        per_host: false
