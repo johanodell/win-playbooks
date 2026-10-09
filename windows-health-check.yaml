@@ -1,23 +1,116 @@
 ---
 - name: Windows Health Check
   hosts: "{{ vm_name }}"
-  gather_facts: true
+  gather_facts: false
 
   tasks:
-    - name: Get disk information
+    - name: Collect Windows health information
       ansible.windows.win_powershell:
         script: |
-          Get-CimInstance Win32_LogicalDisk |
-          Where-Object DriveType -eq 3 |
-          Select-Object DeviceID,
-            @{N='FreeGB';E={[math]::Round($_.FreeSpace/1GB,2)}},
-            @{N='SizeGB';E={[math]::Round($_.Size/1GB,2)}}
-      register: disks
+          $os = Get-CimInstance Win32_OperatingSystem
+          $cpu = Get-CimInstance Win32_Processor
+          $disks = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3"
 
-    - name: Display server information
+          $cpuLoad = [math]::Round(
+            ($cpu | Measure-Object -Property LoadPercentage -Average).Average, 1
+          )
+
+          $totalMemory = [math]::Round(
+            $os.TotalVisibleMemorySize / 1MB, 2
+          )
+
+          $freeMemory = [math]::Round(
+            $os.FreePhysicalMemory / 1MB, 2
+          )
+
+          $memoryUsedPercent = [math]::Round(
+            (1 - ($os.FreePhysicalMemory /
+            $os.TotalVisibleMemorySize)) * 100, 1
+          )
+
+          $diskInfo = @(
+            foreach ($disk in $disks) {
+              $freePercent = if ($disk.Size -gt 0) {
+                [math]::Round(
+                  ($disk.FreeSpace / $disk.Size) * 100, 1
+                )
+              } else {
+                0
+              }
+
+              @{
+                Drive = $disk.DeviceID
+                FreeGB = [math]::Round($disk.FreeSpace / 1GB, 2)
+                TotalGB = [math]::Round($disk.Size / 1GB, 2)
+                FreePercent = $freePercent
+              }
+            }
+          )
+
+          $events = @(
+            foreach ($log in @('System', 'Application')) {
+              Get-WinEvent -FilterHashtable @{
+                LogName = $log
+                Level = 1, 2
+                StartTime = (Get-Date).AddHours(-24)
+              } -MaxEvents 5 -ErrorAction SilentlyContinue |
+              ForEach-Object {
+                @{
+                  Log = $_.LogName
+                  Time = $_.TimeCreated.ToString('s')
+                  EventID = $_.Id
+                  Source = $_.ProviderName
+                  Message = ($_.Message -replace '\s+', ' ')
+                }
+              }
+            }
+          )
+
+          $rebootPaths = @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
+          )
+
+          $pendingReboot = $false
+
+          foreach ($path in $rebootPaths) {
+            if (Test-Path $path) {
+              $pendingReboot = $true
+            }
+          }
+
+          $sessionManager = Get-ItemProperty `
+            'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' `
+            -Name PendingFileRenameOperations `
+            -ErrorAction SilentlyContinue
+
+          if ($sessionManager.PendingFileRenameOperations) {
+            $pendingReboot = $true
+          }
+
+          $Ansible.Result = @{
+            ComputerName = $env:COMPUTERNAME
+            OperatingSystem = $os.Caption
+            LastBoot = $os.LastBootUpTime.ToString('s')
+            CPUPercent = $cpuLoad
+            TotalMemoryGB = $totalMemory
+            FreeMemoryGB = $freeMemory
+            MemoryUsedPercent = $memoryUsedPercent
+            Disks = $diskInfo
+            PendingReboot = $pendingReboot
+            RecentErrors = $events
+          }
+      register: health
+
+    - name: Display Windows health report
       ansible.builtin.debug:
-        msg:
-          - "Host: {{ inventory_hostname }}"
-          - "OS: {{ ansible_facts.os_name }}"
-          - "Memory MB: {{ ansible_facts.memtotal_mb }}"
-          - "Disks: {{ disks.output }}"
+        var: health.result
+
+    - name: Check health thresholds
+      ansible.builtin.assert:
+        that:
+          - health.result.CPUPercent < 90
+          - health.result.MemoryUsedPercent < 90
+          - health.result.Disks | selectattr('FreePercent', 'lt', 20) | list | length == 0
+        fail_msg: "Windows health check detected resource issues."
+        success_msg: "Windows resource health checks passed."
