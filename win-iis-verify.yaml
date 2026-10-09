@@ -1,0 +1,18 @@
+---
+- name: Verify IIS availability
+  hosts: "{{ vm_name }}"
+  gather_facts: false
+
+  tasks:
+    - name: Verify HTTP response
+      ansible.windows.win_uri:
+        url: http://localhost/
+        status_code: 200
+      register: result
+
+    - name: Display verification
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "HTTP status: {{ result.status_code }}"
+          - "Result: HEALTHY"

@@ -1,0 +1,32 @@
+---
+- name: Diagnose IIS availability
+  hosts: "{{ vm_name }}"
+  gather_facts: false
+
+  tasks:
+    - name: Get IIS service status
+      ansible.windows.win_service_info:
+        name: W3SVC
+      register: service
+
+    - name: Check HTTP endpoint
+      ansible.windows.win_uri:
+        url: http://localhost/
+        status_code: 200
+        timeout: 5
+      register: http
+      failed_when: false
+
+    - name: Display diagnosis
+      ansible.builtin.debug:
+        msg:
+          - "Service: {{ service.services[0].state if service.exists else 'missing' }}"
+          - "HTTP status: {{ http.status_code | default('unavailable') }}"
+
+    - name: Fail when IIS is unhealthy
+      ansible.builtin.assert:
+        that:
+          - service.exists
+          - service.services[0].state == 'started'
+          - http.status_code | default(0) == 200
+        fail_msg: "IIS is unhealthy - remediation required"
