@@ -1,0 +1,34 @@
+---
+- name: Collect Windows Event Logs
+  hosts: "{{ vm_name }}"
+  gather_facts: false
+
+  vars:
+    log_name: Application
+    lookback_hours: 1
+
+  tasks:
+    - name: Collect recent errors
+      ansible.windows.win_powershell:
+        script: |
+          $start = (Get-Date).AddHours(-{{ lookback_hours }})
+
+          Get-WinEvent -FilterHashtable @{
+            LogName = '{{ log_name }}'
+            Level = 2
+            StartTime = $start
+          } -ErrorAction SilentlyContinue |
+          Select-Object -First 20 |
+          ForEach-Object {
+            [PSCustomObject]@{
+              Time = $_.TimeCreated.ToString('o')
+              EventID = $_.Id
+              Source = $_.ProviderName
+              Message = $_.Message
+            }
+          }
+      register: events
+
+    - name: Display collected events
+      ansible.builtin.debug:
+        var: events.output

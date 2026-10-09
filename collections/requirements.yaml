@@ -1,0 +1,7 @@
+---
+collections:
+
+ - name: microsoft.sql
+   src: https://console.redhat.com/ansible/automation-hub/repo/published/microsoft/sql 
+
+ - name: community.general

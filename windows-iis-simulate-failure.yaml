@@ -1,0 +1,17 @@
+---
+- name: Simulate IIS service outage
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Stop IIS web service
+      ansible.windows.win_service:
+        name: W3SVC
+        state: stopped
+
+    - name: Show simulated incident
+      ansible.builtin.debug:
+        msg: >-
+          INCIDENT SIMULATED:
+          IIS service W3SVC stopped on
+          {{ inventory_hostname }}

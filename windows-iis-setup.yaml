@@ -1,0 +1,43 @@
+---
+- name: Prepare IIS demo environment
+  hosts: "{{ vm_name }}"
+  gather_facts: false
+
+  tasks:
+    - name: Install IIS
+      ansible.windows.win_feature:
+        name: Web-Server
+        state: present
+        include_management_tools: true
+
+    - name: Create demo web page
+      ansible.windows.win_copy:
+        dest: C:\inetpub\wwwroot\index.html
+        content: |
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>AAP Operations Demo</title>
+          </head>
+          <body style="font-family:Arial;text-align:center;margin-top:100px">
+            <h1>AAP Operations Demo</h1>
+            <h2>Windows Server 2022 - IIS</h2>
+            <p>Application status: ONLINE</p>
+          </body>
+          </html>
+
+    - name: Ensure IIS is running
+      ansible.windows.win_service:
+        name: W3SVC
+        state: started
+        start_mode: auto
+
+    - name: Verify website responds
+      ansible.windows.win_uri:
+        url: http://localhost/
+        status_code: 200
+      register: website
+
+    - name: Show setup result
+      ansible.builtin.debug:
+        msg: "IIS demo ready on {{ inventory_hostname }}"

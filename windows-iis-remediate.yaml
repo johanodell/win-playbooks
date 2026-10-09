@@ -1,0 +1,46 @@
+---
+- name: Diagnose and remediate IIS outage
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Check IIS service status
+      ansible.windows.win_service_info:
+        name: W3SVC
+      register: iis_service
+
+    - name: Verify IIS service exists
+      ansible.builtin.assert:
+        that:
+          - iis_service.exists
+        fail_msg: "IIS service W3SVC does not exist"
+
+    - name: Display current service state
+      ansible.builtin.debug:
+        msg: >-
+          IIS service status:
+          {{ iis_service.services[0].state }}
+
+    - name: Start IIS if stopped
+      ansible.windows.win_service:
+        name: W3SVC
+        state: started
+      when: iis_service.services[0].state != 'started'
+      register: remediation
+
+    - name: Verify HTTP endpoint
+      ansible.windows.win_uri:
+        url: http://localhost/
+        status_code: 200
+      register: http_result
+      retries: 5
+      delay: 3
+      until: http_result is succeeded
+
+    - name: Report remediation result
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "Remediation performed: {{ remediation is changed }}"
+          - "HTTP status: {{ http_result.status_code }}"
+          - "Application status: HEALTHY"

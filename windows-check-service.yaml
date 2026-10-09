@@ -1,0 +1,14 @@
+---
+- name: Check Windows Service
+  hosts: "{{ vm_name }}" 
+  gather_facts: false
+
+  tasks:
+    - name: Get service information
+      ansible.windows.win_service_info:
+        name: "{{ service_name }}"
+      register: service_info
+
+    - name: Show service status
+      ansible.builtin.debug:
+        msg: "{{ service_info.services }}"

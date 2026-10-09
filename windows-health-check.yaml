@@ -1,0 +1,23 @@
+---
+- name: Windows Health Check
+  hosts: "{{ vm_name }}"
+  gather_facts: true
+
+  tasks:
+    - name: Get disk information
+      ansible.windows.win_powershell:
+        script: |
+          Get-CimInstance Win32_LogicalDisk |
+          Where-Object DriveType -eq 3 |
+          Select-Object DeviceID,
+            @{N='FreeGB';E={[math]::Round($_.FreeSpace/1GB,2)}},
+            @{N='SizeGB';E={[math]::Round($_.Size/1GB,2)}}
+      register: disks
+
+    - name: Display server information
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "OS: {{ ansible_facts.os_name }}"
+          - "Memory MB: {{ ansible_facts.memtotal_mb }}"
+          - "Disks: {{ disks.output }}"
