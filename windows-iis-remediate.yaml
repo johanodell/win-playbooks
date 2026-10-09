@@ -1,6 +1,6 @@
 ---
 - name: Diagnose and remediate IIS outage
-  hosts: all
+  hosts: "{{ vm_name }}" 
   gather_facts: false
 
   tasks:
